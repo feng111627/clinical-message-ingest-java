@@ -72,24 +72,35 @@ public class MessageIngestService {
         String name = pid.field(5);
         String gender = pid.field(8);
 
-        // 2. 关键患者字段校验：姓名为空按独立原因拒收（骨架占位：规则后续填充）
-        // TODO: 填充关键字段为空的拒收逻辑
-
-        // 3. 幂等：区分"内容一致的重发"与"编号复用"
+        // 2. 幂等：区分"内容一致的重发"与"编号复用"（原子判定，并发下同编号只放行一条）
         String contentHash = sha256(rawMessage.strip());
         MessageStore.MarkResult mark = messageStore.markIfAbsent(controlId, contentHash);
         if (mark == MessageStore.MarkResult.DUPLICATE) {
-            log.info("ingest controlId={} status={} reason=消息控制标识与内容均一致，判定为重复投递",
-                    controlId, IngestStatus.DUPLICATE_RESENT);
+            String original = messageStore.findByControlId(controlId)
+                    .map(r -> String.valueOf(r.status()))
+                    .orElse("处理中");
+            log.info("ingest controlId={} status={} reason=消息控制标识与内容均一致，判定为重复投递（原结论={}）",
+                    controlId, IngestStatus.DUPLICATE_RESENT, original);
             return IngestResult.of(IngestStatus.DUPLICATE_RESENT, controlId,
-                    "消息控制标识 " + controlId + " 已处理过且内容完全一致，判定为重复投递，未产生重复记录");
+                    "消息控制标识 " + controlId + " 已处理过且内容完全一致，判定为重复投递，未产生重复记录（原结论: "
+                            + original + "）");
         }
         if (mark == MessageStore.MarkResult.ID_REUSED) {
-            // TODO: 填充编号复用拒收逻辑（不动已有数据）
-            log.info("ingest controlId={} status={} reason=消息控制标识被复用但内容不一致",
+            log.info("ingest controlId={} status={} reason=消息控制标识被复用但内容不一致，判定为编号复用，不动已有数据",
                     controlId, IngestStatus.REJECTED_ID_REUSED);
             return IngestResult.of(IngestStatus.REJECTED_ID_REUSED, controlId,
-                    "消息控制标识 " + controlId + " 已被内容不同的消息使用，判定为编号复用，已拒收且未改动患者数据");
+                    "消息控制标识 " + controlId + " 已被内容不同的消息使用，判定为编号复用（上游出错），"
+                            + "已拒收且未改动患者数据");
+        }
+
+        // 3. 关键患者字段校验：姓名为空按独立原因拒收，不写入患者档案，避免污染下游对账
+        if (name.isBlank()) {
+            IngestResult result = IngestResult.of(IngestStatus.REJECTED_MISSING_KEY_FIELD, controlId,
+                    "关键患者字段 PID-5（姓名）为空，按 REJECTED_MISSING_KEY_FIELD 拒收，"
+                            + "未写入患者档案（区别于解析失败与更新冲突）");
+            messageStore.recordOutcome(controlId, result.status(), result.detail(), patientId);
+            log.info("ingest controlId={} status={} detail={}", controlId, result.status(), result.detail());
+            return result;
         }
 
         // 4. 按业务时间合并
@@ -100,10 +111,11 @@ public class MessageIngestService {
         return result;
     }
 
-    /** 批量接入：整批超限则确定性拒收；否则按到达顺序逐条处理（骨架占位实现）。 */
+    /** 批量接入：整批超限则确定性拒收（一条都不处理）；否则按到达顺序逐条处理。 */
     public BatchIngestResult ingestBatch(List<String> rawMessages) {
-        // TODO: 填充批量接入逻辑
         if (rawMessages.size() > maxBatchSize) {
+            log.info("ingestBatch rejected size={} maxBatchSize={} reason=超过批量容量上限，整批拒收",
+                    rawMessages.size(), maxBatchSize);
             return BatchIngestResult.rejected(rawMessages.size(), maxBatchSize);
         }
         List<IngestResult> results = new ArrayList<>(rawMessages.size());
@@ -122,10 +134,13 @@ public class MessageIngestService {
             case IGNORED_STALE -> IngestResult.of(IngestStatus.IGNORED_STALE, controlId,
                     "业务时间 " + businessTime + " 早于患者 " + patientId + " 现有记录，旧数据已忽略，未反盖新数据");
             case CONFLICT_SAME_TIME -> {
-                // TODO: 填充冲突留痕
-                yield IngestResult.of(IngestStatus.CONFLICT_UPDATE, controlId,
-                        "业务时间 " + businessTime + " 与患者 " + patientId + " 现有记录相同但内容对不上，"
-                                + "差异字段 " + merged.differingFields() + "，已有数据保持不动");
+                String detail = "业务时间 " + businessTime + " 与患者 " + patientId + " 现有记录（来源消息 "
+                        + merged.existingControlId() + "）相同但内容对不上，差异字段 " + merged.differingFields()
+                        + "，判定为更新冲突，已有数据保持不动，待人工核对";
+                // 冲突留痕：哪条跟哪条冲突、哪些字段对不上、判断依据，事后可查
+                conflictStore.record(new ConflictRecord(patientId, businessTime,
+                        merged.existingControlId(), controlId, merged.differingFields(), detail, Instant.now()));
+                yield IngestResult.of(IngestStatus.CONFLICT_UPDATE, controlId, detail);
             }
             case CONFLICT_PATIENT_ID -> IngestResult.of(IngestStatus.REJECTED_CONFLICT, controlId,
                     "患者标识冲突: " + patientId + " 与本地已有记录本地病案号相同但分配机构不同");

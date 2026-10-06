@@ -33,17 +33,40 @@ public class PatientRecord {
     public String getLastControlId() { return lastControlId; }
 
     /**
-     * 按业务时间合并（骨架占位实现，后续填充完整规则）。
+     * 按业务时间合并：
+     * - businessTime 早于现有记录 -> STALE，忽略，不反盖新数据；
+     * - businessTime 相同但内容对不上 -> CONFLICT，已有数据保持不动，返回差异字段；
+     * - 其余（更新、或同时刻内容一致）-> APPLIED，覆盖。
      */
     public synchronized ApplyResult apply(String name, String gender, LocalDateTime businessTime, String controlId) {
-        // TODO: 填充  stale / 同时间冲突 / 应用 的完整规则
-        if (lastUpdated != null && businessTime.isBefore(lastUpdated)) {
-            return new ApplyResult(ApplyOutcome.STALE, List.of());
+        if (lastUpdated != null) {
+            if (businessTime.isBefore(lastUpdated)) {
+                return new ApplyResult(ApplyOutcome.STALE, List.of());
+            }
+            if (businessTime.isEqual(lastUpdated)) {
+                List<String> differing = differingFields(name, gender);
+                if (!differing.isEmpty()) {
+                    // 同一时间、内容对不上：判冲突，已有数据保持不动
+                    return new ApplyResult(ApplyOutcome.CONFLICT, differing);
+                }
+            }
         }
         this.name = name;
         this.gender = gender;
         this.lastUpdated = businessTime;
         this.lastControlId = controlId;
         return new ApplyResult(ApplyOutcome.APPLIED, List.of());
+    }
+
+    /** 列出与现有内容对不上的字段（PID-5 姓名 / PID-8 性别）。 */
+    private List<String> differingFields(String name, String gender) {
+        List<String> differing = new ArrayList<>(2);
+        if (!java.util.Objects.equals(this.name, name)) {
+            differing.add("PID-5");
+        }
+        if (!java.util.Objects.equals(this.gender, gender)) {
+            differing.add("PID-8");
+        }
+        return differing;
     }
 }

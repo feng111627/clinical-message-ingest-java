@@ -22,26 +22,28 @@ public class MessageStore {
     private final Map<String, MessageRecord> messages = new ConcurrentHashMap<>();
 
     /**
-     * 骨架占位实现：按控制标识 + 内容指纹判定 NEW / DUPLICATE / ID_REUSED。
+     * 幂等判定（原子）：同一控制标识
+     * - 首次到达 -> NEW，并以 PENDING 占位（并发下同编号消息只放行一条进入后续处理）；
+     * - 已存在且内容指纹一致 -> DUPLICATE（一字不差的重发）；
+     * - 已存在但内容指纹不一致 -> ID_REUSED（编号被复用，上游出错）。
      */
     public MarkResult markIfAbsent(String controlId, String contentHash) {
-        // TODO: 填充原子判定逻辑
-        MessageRecord existing = messages.get(controlId);
-        if (existing == null) {
-            messages.put(controlId, new MessageRecord(controlId, contentHash, null, null, null, Instant.now()));
-            return MarkResult.NEW;
-        }
-        return existing.contentHash().equals(contentHash) ? MarkResult.DUPLICATE : MarkResult.ID_REUSED;
+        MarkResult[] verdict = new MarkResult[1];
+        messages.compute(controlId, (id, existing) -> {
+            if (existing == null) {
+                verdict[0] = MarkResult.NEW;
+                return new MessageRecord(id, contentHash, null, null, null, Instant.now());
+            }
+            verdict[0] = existing.contentHash().equals(contentHash) ? MarkResult.DUPLICATE : MarkResult.ID_REUSED;
+            return existing;
+        });
+        return verdict[0];
     }
 
-    /** 回填某条消息的最终处理结论（骨架占位实现）。 */
+    /** 回填某条消息的最终处理结论（保留首次登记的内容指纹）。 */
     public void recordOutcome(String controlId, IngestStatus status, String detail, String patientId) {
-        // TODO: 填充结论回填逻辑
-        MessageRecord existing = messages.get(controlId);
-        if (existing != null) {
-            messages.put(controlId, new MessageRecord(controlId, existing.contentHash(),
-                    status, detail, patientId, Instant.now()));
-        }
+        messages.computeIfPresent(controlId, (id, existing) -> new MessageRecord(
+                id, existing.contentHash(), status, detail, patientId, Instant.now()));
     }
 
     public Optional<MessageRecord> findByControlId(String controlId) {
