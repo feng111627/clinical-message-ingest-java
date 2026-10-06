@@ -6,6 +6,7 @@ import com.github.feng111627.clinicalmessageingestjava.ingest.IngestResult;
 import com.github.feng111627.clinicalmessageingestjava.ingest.IngestStatus;
 import com.github.feng111627.clinicalmessageingestjava.ingest.MessageIngestService;
 import com.github.feng111627.clinicalmessageingestjava.merge.PatientMergeService;
+import com.github.feng111627.clinicalmessageingestjava.store.ConflictStore;
 import com.github.feng111627.clinicalmessageingestjava.store.MessageStore;
 import com.github.feng111627.clinicalmessageingestjava.store.PatientStore;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,14 +24,17 @@ class MessageIngestServiceTest {
 
     private MessageStore messageStore;
     private PatientStore patientStore;
+    private ConflictStore conflictStore;
     private MessageIngestService service;
 
     @BeforeEach
     void setUp() {
         messageStore = new MessageStore();
         patientStore = new PatientStore();
+        conflictStore = new ConflictStore();
         service = new MessageIngestService(new Hl7Parser(), messageStore,
-                new PatientMergeService(patientStore));
+                new PatientMergeService(patientStore), conflictStore,
+                MessageIngestService.DEFAULT_MAX_BATCH_SIZE);
     }
 
     /** 构造一条 ADT^A01 消息。 */
